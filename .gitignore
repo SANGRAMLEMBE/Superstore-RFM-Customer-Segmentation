@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+~$*
+
+# never upload assistant/tool files
+.claude/
+CLAUDE.md
