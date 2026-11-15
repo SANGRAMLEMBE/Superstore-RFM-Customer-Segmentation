@@ -21,13 +21,16 @@ python -m streamlit run dashboard/app.py
 Run it from the project root so the theme in `.streamlit/config.toml` is used, then open
 **http://localhost:8501**. On Windows you can also double-click `run_dashboard.bat`.
 
-### Deploy on Streamlit Community Cloud
+### Deploy online (free, on Render)
 
-1. Push this repo to GitHub.
-2. Go to **share.streamlit.io**, sign in with GitHub and click **Create app → Deploy a public app from GitHub**.
-3. Pick this repository, branch `main`, main file path **`dashboard/app.py`**, then **Deploy**.
+1. Sign in at **render.com** with GitHub.
+2. Click **New → Blueprint**, pick this repository and click **Apply**. Render reads `render.yaml`,
+   installs `requirements.txt` and starts the app.
+3. After the first build (a few minutes) the app is live at `https://<service-name>.onrender.com`.
 
-The app installs `requirements.txt` and reads the data files from the repo, so no other setup is needed.
+The free plan sleeps after 15 minutes without visitors; the first visit after that takes about a minute.
+The same start command is in `Procfile` (Heroku, Koyeb) and the Python version in `.python-version`.
+On Streamlit Community Cloud, use main file path `dashboard/app.py`.
 
 ## What's in this repo
 
