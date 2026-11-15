@@ -8,7 +8,8 @@ interactive dashboard.
 We analyse the **Sample Superstore** dataset (9,994 order lines, 5,009 orders, 793 customers, 2014–2017),
 find where sales and profit come from, score every customer on **Recency, Frequency and Monetary value**,
 group them into five segments (Champions, Loyal Customers, Potential Loyalists, At Risk, Low Value) and
-recommend a marketing action for each segment.
+recommend a marketing action for each segment. Machine learning checks the segments (K-Means clustering)
+and predicts loss-making orders (Logistic Regression, Decision Tree, Random Forest).
 
 ## Run the dashboard
 
@@ -36,9 +37,10 @@ On Streamlit Community Cloud, use main file path `dashboard/app.py`.
 
 | Path | What it is |
 |---|---|
-| `dashboard/app.py` | The dashboard: sidebar filters and 5 pages |
+| `dashboard/app.py` | The dashboard: sidebar filters and 6 pages |
 | `dashboard/preprocessing.py` | Cleaning pipeline (duplicates, missing values, text fixes, checks, outliers) |
 | `dashboard/rfm.py` | RFM calculation, quintile scoring and segment rules |
+| `dashboard/ml.py` | K-Means clustering, loss-making order prediction, churn check (scikit-learn) |
 | `dashboard/charts.py` | All Plotly charts and the colour theme |
 | `Superstore_raw.csv` | Raw data the dashboard loads (10,004 rows, with duplicates, blanks and text errors) |
 | `Sample - Superstore.csv` | Original dataset, used to verify the cleaned data (0 differences) |
@@ -49,8 +51,17 @@ On Streamlit Community Cloud, use main file path `dashboard/app.py`.
 1. **Overview**: KPIs, sales by category / region / customer type / year, monthly trend, data preview
 2. **Sales & Products**: trend explorer, year-on-year table, sub-category sales and profit, discount impact, top products
 3. **RFM Segmentation**: method, segment sizes and sales, R × F grid, customer map, segment actions, customer list
-4. **Data Quality**: cleaning log, column profile, check against the original file
-5. **Insights & Actions**: six findings with evidence, marketing plan per segment, next steps
+4. **ML Models**: K-Means clusters vs RFM segments, loss-prediction model comparison, what-if predictor, churn check
+5. **Data Quality**: cleaning log, column profile, check against the original file
+6. **Insights & Actions**: six findings with evidence, marketing plan per segment, next steps
+
+## Machine learning
+
+| Model | Type | Result |
+|---|---|---|
+| K-Means (k = 4) on log-scaled, standardised R, F, M | Unsupervised clustering | 4 clusters that line up with the RFM segments (silhouette 0.26, ARI 0.26) |
+| Logistic Regression, Decision Tree, Random Forest | Supervised classification: will an order line make a loss? | Decision Tree catches 82% of loss lines vs 71% for a "discount > 20%" rule (F1 0.85); discount is the main driver |
+| Random Forest churn check | Supervised classification: no order in the next 6 months? | ROC-AUC 0.52 (no better than chance), so not used |
 
 ## RFM method
 

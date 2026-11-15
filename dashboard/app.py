@@ -8,6 +8,7 @@ Pages
   Overview            KPIs, sales by category / region / customer type, monthly trend, data
   Sales & Products    trend explorer, year-on-year, sub-category sales and profit, discounts, top products
   RFM Segmentation    method, segment sizes and revenue, R x F grid, customer scatter, customer list
+  ML Models           K-Means customer clusters, loss-making order prediction + what-if, churn check
   Data Quality        cleaning log, column profile, check against the original file
   Insights & Actions  findings with evidence, marketing action per segment
 """
@@ -20,6 +21,7 @@ import pandas as pd
 import streamlit as st
 
 import charts as ch
+import ml
 import rfm as rf
 from preprocessing import clean, compare_with_reference, read_raw
 
@@ -69,12 +71,33 @@ def load(mtime):   # mtime in the cache key -> reloads when the CSV changes
     raw = read_raw(DATA)
     res = clean(raw)
     customers, snapshot = rf.compute(res.df)
-    return raw, res, customers, snapshot
+    customers, clusters, ari = ml.kmeans_fit(customers)   # adds the K-Means Cluster column
+    return raw, res, customers, snapshot, clusters, ari
 
 
-raw, res, customers, SNAPSHOT = load(DATA.stat().st_mtime)
+MTIME = DATA.stat().st_mtime
+raw, res, customers, SNAPSHOT, CLUSTERS, ARI = load(MTIME)
 base = res.df
 SEG_SUMMARY = rf.summary(customers)
+
+
+@st.cache_data
+def k_scan(mtime):
+    return ml.kmeans_scan(customers)
+
+
+@st.cache_resource
+def loss_models(mtime):
+    x, y = ml.loss_dataset(base)
+    metrics, curves, cms, fitted, split = ml.train_loss_models(x, y)
+    best = metrics.drop(index=ml.RULE)["F1"].idxmax()
+    imp = ml.feature_importance(fitted[best], split["x_test"], split["y_test"])
+    return metrics, curves, cms, fitted, split, best, imp
+
+
+@st.cache_data
+def churn_result(mtime):
+    return ml.churn_check(base)
 
 DESCRIPTIONS = {
     "Row ID": "Line-item key (one row per product in an order)",
@@ -463,7 +486,147 @@ def rfm_page():
 
 
 # ---------------------------------------------------------------------------
-# Page 4 - Data quality
+# Page 4 - Machine learning
+# ---------------------------------------------------------------------------
+def cluster_html(c):
+    return f"<span class='dot' style='background:{ch.CLUSTER_COLOR[c]}'></span>{c}"
+
+
+def ml_page():
+    header("Machine Learning Models",
+           "Unsupervised clustering of customers and a supervised model that predicts loss-making orders. "
+           "Trained on the full dataset; sidebar filters don't apply here.", scoped=False)
+
+    # 1 - K-Means ----------------------------------------------------------------
+    st.markdown("<div class='card-title' style='font-size:1.2rem'>1 · K-Means clustering (unsupervised)</div>"
+                "<div class='card-note'>Customers grouped by the algorithm on log-scaled, standardised Recency, "
+                "Frequency and Monetary value, then compared with our rule-based RFM segments.</div>",
+                unsafe_allow_html=True)
+    scan = k_scan(MTIME)
+    sil = scan.set_index("k").at[ml.K, "Silhouette"]
+    top = CLUSTERS.loc["Top Spenders"]
+    k = st.columns(4)
+    k[0].metric("Clusters (k)", f"{ml.K}", border=True, help="Chosen with the elbow method and silhouette score")
+    k[1].metric("Silhouette score", f"{sil:.2f}", border=True,
+                help="−1 to 1: how well each customer fits its own cluster vs the nearest other one")
+    k[2].metric("Agreement with RFM segments", f"ARI {ARI:.2f}", border=True,
+                help="Adjusted Rand Index: 0 = random, 1 = identical groupings")
+    k[3].metric("Top Spenders", f"{int(top['Customers'])} customers", f"{top['Sales_Share']:.0%} of sales",
+                delta_color="off", delta_arrow="off", border=True)
+
+    left, right = st.columns(2)
+    with left:
+        with card("Elbow method", "Within-cluster error (inertia) falls more slowly after k = 4"):
+            show(ch.k_chart(scan, "Inertia", ml.K, "Inertia"), key="ml_elbow")
+    with right:
+        with card("Silhouette score", "Higher = better separated. k = 2 only splits good vs bad customers; "
+                                      "k = 4 scores as well as k = 3 and gives more useful groups"):
+            show(ch.k_chart(scan, "Silhouette", ml.K, "Silhouette score"), key="ml_sil")
+
+    left, right = st.columns([1.1, 1])
+    with left:
+        with card("Cluster profiles", "Average values per cluster, named from those averages"):
+            html_table(pd.DataFrame({
+                "Cluster": [cluster_html(c) for c in CLUSTERS.index],
+                "Customers": CLUSTERS["Customers"].astype(int),
+                "Avg recency": CLUSTERS["Recency"].map(lambda v: f"{v:.0f} days"),
+                "Avg orders": CLUSTERS["Frequency"].map(lambda v: f"{v:.1f}"),
+                "Avg sales": CLUSTERS["Monetary"].map(ch.money),
+                "Share of sales": CLUSTERS["Sales_Share"].map(pct),
+            }), raw_html=("Cluster",))
+            st.caption("The clusters follow the RFM logic: no Champion falls into Slipping Away or Lost, and almost "
+                       "all At Risk and Low Value customers do. K-Means confirms the segments are real groups in "
+                       "the data, not just score cut-offs.")
+    with right:
+        with card("RFM segment × K-Means cluster", "Customers in each combination"):
+            t = pd.crosstab(customers["RFM_Segment"], customers["Cluster"]).reindex(
+                index=rf.SEGMENTS, columns=ml.CLUSTER_NAMES, fill_value=0)
+            show(ch.heatmap(t, lambda v: f"{v:,.0f}", height=300, prefix=""), key="ml_cross")
+
+    # 2 - loss prediction ----------------------------------------------------------
+    metrics, curves, cms, fitted, split, best, imp = loss_models(MTIME)
+    st.markdown("<div class='card-title' style='font-size:1.2rem; margin-top:1rem'>2 · Predicting loss-making orders "
+                "(supervised classification)</div><div class='card-note'>Will an order line make a loss (profit &lt; 0)? "
+                "Inputs: discount, sales, quantity, category, sub-category, region, customer type, ship mode. "
+                "70% of lines train the models, 30% test them.</div>", unsafe_allow_html=True)
+    b, r = metrics.loc[best], metrics.loc[ml.RULE]
+    k = st.columns(4)
+    k[0].metric("Order lines", f"{split['train']:,} / {split['test']:,}", "train / test", delta_color="off",
+                delta_arrow="off", border=True)
+    k[1].metric("Loss-making lines", pct((base["Profit"] < 0).mean()), border=True)
+    k[2].metric(f"Best model: {best}", f"F1 {b['F1']:.2f}", f"vs {r['F1']:.2f} for the discount rule",
+                delta_color="off", delta_arrow="off", border=True, help="Best F1 score on the test set")
+    k[3].metric("Loss lines caught (recall)", pct(b["Recall"]), f"vs {pct(r['Recall'])} for the discount rule",
+                delta_color="off", delta_arrow="off", border=True)
+
+    with card("Model comparison on the test set", "Baseline = flag every line with more than 20% discount"):
+        m = metrics.copy()
+        html_table(pd.DataFrame({
+            "Model": [f"<b>{i}</b>" if i == best else html.escape(i) for i in m.index],
+            "Accuracy": m["Accuracy"].map(lambda v: f"{v:.1%}"), "Precision": m["Precision"].map(lambda v: f"{v:.1%}"),
+            "Recall": m["Recall"].map(lambda v: f"{v:.1%}"), "F1": m["F1"].map(lambda v: f"{v:.3f}"),
+            "ROC-AUC": m["ROC_AUC"].map(lambda v: "–" if pd.isna(v) else f"{v:.3f}"),
+        }), raw_html=("Model",))
+        st.caption("Accuracy is high even for the simple rule because 81% of lines are profitable, so recall and F1 "
+                   "matter more: the models catch more of the loss-making lines than the rule does.")
+
+    left, right = st.columns(2)
+    with left:
+        with card("ROC curves", "Closer to the top-left corner = better; dotted line = random guess"):
+            show(ch.roc_chart(curves), key="ml_roc")
+    with right:
+        with card(f"What drives a loss ({best})", "Permutation importance: drop in ROC-AUC when one input is shuffled"):
+            g = imp.clip(lower=0).rename(index=ml.FEATURE_LABEL)
+            show(ch.hbar(g.index, g.values, ch.NEUTRAL, [f"{v:.3f}" for v in g.values], height=330,
+                         hover="%{y}: %{x:.3f}<extra></extra>"), key="ml_imp")
+
+    left, right = st.columns([1, 1.3])
+    with left:
+        with card(f"Confusion matrix ({best})", f"{split['test']:,} test lines"):
+            cm = pd.DataFrame(cms[best], index=["Actual: profit", "Actual: loss"],
+                              columns=["Predicted: profit", "Predicted: loss"])
+            show(ch.heatmap(cm, lambda v: f"{v:,.0f}", height=260, prefix=""), key="ml_cm")
+    with right:
+        with card("What-if: will this order line make a loss?", f"Prediction from the {best} model"):
+            c1, c2, c3 = st.columns(3)
+            cat = c1.selectbox("Category", sorted(base["Category"].unique()), key="wi_cat")
+            subs = sorted(base.loc[base["Category"] == cat, "Sub-Category"].unique())
+            sub = c2.selectbox("Sub-category", subs, key="wi_sub")
+            region = c3.selectbox("Region", sorted(base["Region"].unique()), key="wi_region")
+            c1, c2, c3 = st.columns(3)
+            seg = c1.selectbox("Customer type", sorted(base["Segment"].unique()), key="wi_seg")
+            ship = c2.selectbox("Ship mode", sorted(base["Ship Mode"].unique()), key="wi_ship")
+            disc = c3.select_slider("Discount", [0, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], value=0.2,
+                                    format_func=pct, key="wi_disc")
+            c1, c2 = st.columns(2)
+            typical = float(base.loc[base["Sub-Category"] == sub, "Sales"].median())
+            sales = c1.number_input("Sales value ($)", 1.0, 25000.0, round(typical, 2), key=f"wi_sales_{sub}")
+            qty = c2.number_input("Quantity", 1, 14, 3, key="wi_qty")
+            row = pd.DataFrame([{"Discount": disc, "Sales": sales, "Quantity": qty, "Category": cat,
+                                 "Sub-Category": sub, "Region": region, "Segment": seg, "Ship Mode": ship}])
+            p = float(fitted[best].predict_proba(row)[0, 1])
+            hist = base[(base["Sub-Category"] == sub) & (base["Discount"] == disc)]
+            a, b2 = st.columns(2)
+            a.metric("Chance of a loss", pct(p), "likely loss" if p >= 0.5 else "likely profitable",
+                     delta_color="inverse" if p >= 0.5 else "normal", border=True)
+            b2.metric("Actual history", pct((hist["Profit"] < 0).mean()) if len(hist) else "–",
+                      f"of {len(hist)} past {sub} lines at {pct(disc)} discount" if len(hist) else "no past lines",
+                      delta_color="off", delta_arrow="off", border=True)
+
+    # 3 - churn check ----------------------------------------------------------------
+    ch_res = churn_result(MTIME)
+    with card("3 · Churn prediction: tested, not used",
+              "Could RFM features predict which customers will not order in the next 6 months?"):
+        text(f"We trained a Random Forest on orders up to {ml.CHURN_CUTOFF:%d %b %Y} for {ch_res['customers']} "
+             f"customers ({ch_res['churn_rate']:.0%} did not order in the next 6 months). Cross-validated ROC-AUC "
+             f"was **{ch_res['auc']:.2f}**, about the same as a coin flip (0.50). In this dataset, past recency, "
+             "frequency and spend don't predict the timing of the next order, so we use RFM segments and the "
+             "clusters for retention instead of a churn score. Campaign-response data would be needed for a "
+             "reliable churn model.")
+
+
+# ---------------------------------------------------------------------------
+# Page 5 - Data quality
 # ---------------------------------------------------------------------------
 def data_quality():
     header("Data Preparation & Cleaning",
@@ -510,7 +673,7 @@ def data_quality():
 
 
 # ---------------------------------------------------------------------------
-# Page 5 - Insights and actions
+# Page 6 - Insights and actions
 # ---------------------------------------------------------------------------
 def insights():
     header("Key Insights & Marketing Actions",
@@ -589,11 +752,11 @@ def insights():
 
     with card("Next steps"):
         st.markdown(
-            "1. **Validate the segments with K-Means clustering** on standardised R, F and M, and compare with the "
-            "rule-based segments.\n"
-            "2. **Customer lifetime value (CLV)** per segment to size the marketing budget.\n"
-            "3. **Track segment movement** each quarter (e.g. Loyal → At Risk) to trigger campaigns early.\n"
-            "4. **Add profit to the scoring** so heavily discounted, low-profit customers are not over-rewarded.")
+            "1. **Check discounts with the loss model** before a campaign goes out (ML Models page, what-if).\n"
+            "2. **Collect campaign response data** so a response / churn model can be trained; purchase timing in "
+            "this dataset alone can't predict churn.\n"
+            "3. **Customer lifetime value (CLV)** per segment to size the marketing budget.\n"
+            "4. **Track segment movement** each quarter (e.g. Loyal → At Risk) to trigger campaigns early.")
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +766,7 @@ pages = [
     st.Page(overview, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
     st.Page(sales_products, title="Sales & Products", icon=":material/shopping_cart:", url_path="sales"),
     st.Page(rfm_page, title="RFM Segmentation", icon=":material/groups:", url_path="rfm"),
+    st.Page(ml_page, title="ML Models", icon=":material/model_training:", url_path="ml"),
     st.Page(data_quality, title="Data Quality", icon=":material/cleaning_services:", url_path="data-quality"),
     st.Page(insights, title="Insights & Actions", icon=":material/lightbulb:", url_path="insights"),
 ]

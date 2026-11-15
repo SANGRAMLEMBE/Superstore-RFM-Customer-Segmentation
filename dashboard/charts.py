@@ -129,12 +129,12 @@ def _on_dark(v, lo, hi):
     return (v - lo) / ((hi - lo) or 1) >= 0.5
 
 
-def heatmap(t, fmt, height=300):
+def heatmap(t, fmt, height=300, prefix="$"):
     """Rows x columns table of values, darker = larger."""
     fig = go.Figure(go.Heatmap(
         z=t.values, x=list(t.columns), y=list(t.index), colorscale=SEQUENTIAL, xgap=2, ygap=2,
-        colorbar=dict(thickness=10, outlinewidth=0, len=0.8, tickprefix="$"),
-        hovertemplate="%{y} · %{x}: $%{z:,.0f}<extra></extra>",
+        colorbar=dict(thickness=10, outlinewidth=0, len=0.8, tickprefix=prefix),
+        hovertemplate="%{y} · %{x}: " + prefix + "%{z:,.0f}<extra></extra>",
     ))
     lo, hi = (np.nanmin(t.values), np.nanmax(t.values)) if t.size else (0, 1)
     for i, r in enumerate(t.index):
@@ -215,4 +215,43 @@ def rf_grid(rfm, height=330):
     fig.update_xaxes(title="Recency score (5 = bought most recently)", showgrid=False, side="bottom")
     fig.update_yaxes(title="Frequency score (5 = most orders)", showgrid=False)
     fig.update_layout(height=height)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Machine learning
+# ---------------------------------------------------------------------------
+CLUSTER_COLOR = dict(zip(["Top Spenders", "Recent Buyers", "Slipping Away", "Lost / Low Value"],
+                         ["#2A78D6", "#1BAF7A", "#EDA100", "#E34948"]))
+MODEL_COLOR = {"Logistic Regression": "#2A78D6", "Decision Tree": "#EB6834", "Random Forest": "#1BAF7A"}
+
+
+def k_chart(scan, col, chosen, title, height=250):
+    """Inertia or silhouette for each k, chosen k highlighted."""
+    fig = go.Figure(go.Scatter(
+        x=scan["k"], y=scan[col], mode="lines+markers", line=dict(color=NEUTRAL, width=2),
+        marker=dict(size=[13 if k == chosen else 8 for k in scan["k"]],
+                    color=["#E34948" if k == chosen else NEUTRAL for k in scan["k"]],
+                    line=dict(color="white", width=1.5)),
+        hovertemplate="k = %{x}: %{y:,.3f}<extra></extra>",
+    ))
+    row = scan[scan["k"] == chosen].iloc[0]
+    fig.add_annotation(x=chosen, y=row[col], text=f"k = {chosen}", showarrow=False, yshift=16,
+                       font=dict(color=INK, size=12))
+    fig.update_xaxes(title="Number of clusters (k)", dtick=1, showgrid=False)
+    fig.update_yaxes(title=title)
+    fig.update_layout(height=height)
+    return fig
+
+
+def roc_chart(curves, height=360):
+    fig = go.Figure(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Random guess",
+                               line=dict(color=FAINT, width=1.5, dash="dot"), hoverinfo="skip"))
+    for name, (fpr, tpr) in curves.items():
+        fig.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=name,
+                                 line=dict(color=MODEL_COLOR[name], width=2),
+                                 hovertemplate="False alarms %{x:.0%} · caught %{y:.0%}<extra>" + name + "</extra>"))
+    fig.update_xaxes(title="False positive rate (profitable lines flagged)", tickformat=".0%", range=[0, 1])
+    fig.update_yaxes(title="True positive rate (loss lines caught)", tickformat=".0%", range=[0, 1.02])
+    fig.update_layout(height=height, legend=dict(y=1.02))
     return fig
